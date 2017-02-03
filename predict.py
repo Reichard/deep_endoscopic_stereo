@@ -1,12 +1,12 @@
 from dispnet import *
 
-def main(num_epochs=500):
-    network = DispNet()
-    network.load('dispnet')
+network = DispNet()
+network.load('dispnet.npz')
 
-    batch = load_batch(700,'TRAIN','C')
-    disp = network.predict(batch)
-    disp.save('disp.png')
+left = Image.open("/org/share/MediData/MedData/Simluation/dispnet/finalpass/frames_finalpass/TEST/A/0000/left/0006.png")
+right = Image.open("/org/share/MediData/MedData/Simluation/dispnet/finalpass/frames_finalpass/TEST/A/0000/right/0006.png")
 
-if __name__ == '__main__':
-	main()
+batch = make_batch([left],[right])
+disp = network.predict(batch)
+
+disp.save('disp.png')

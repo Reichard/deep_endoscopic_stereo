@@ -5,8 +5,8 @@ def main():
     network = DispNet()
     network.load('dispnet.npz')
 
-    left = Image.open('./tier2/left/20.png')
-    right = Image.open('./tier2/right/20.png')
+    left = Image.open('data/tier2/left/20.png')
+    right = Image.open('data/tier2/right/20.png')
     left = left.crop((600,21,1300,510))
     right = right.crop((600,21,1300,510))
 
