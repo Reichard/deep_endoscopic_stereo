@@ -1,0 +1,22 @@
+#!/bin/bash
+
+mkdir -p hamlyn/out
+
+echo "predicting disparities..."
+
+python3 hamlyn.py || exit 1
+
+echo "done"
+
+mkdir -p hamlyn/results/
+
+cd opencv
+	echo "converting disparities..."
+	python unrectify_hamlyn_disps.py || exit 1
+	echo "done"
+
+	echo "quick evaluation"
+	python evaluate_hamlyn.py || exit 1
+	echo "done"
+cd ..
+

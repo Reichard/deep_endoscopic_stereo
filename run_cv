@@ -1,0 +1,34 @@
+#!/bin/bash
+
+REPROJECT=tmi/tmi
+
+mkdir -p tmi/out
+
+echo "predicting disparities..."
+
+python3 tmi.py || exit 1
+
+echo "done"
+
+echo "converting disparities..."
+
+mkdir -p tmi/results/Stereo_SD_d_all
+
+
+for i in $(seq 1 35); do
+	disp=tmi/out/${i}.disp
+	calib=/org/share/MediData/MedData/TMI\ Dataset/Stereo_SD_d_all/Stereo_SD_d_all_${i}/Stereo_SD_d_all_${i}_Calibration.txt
+	out=tmi/results/Stereo_SD_d_all/Stereo_SD_d_all_${i}_result.xyz
+
+	#echo $REPROJECT $disp $calib
+	#$REPROJECT "$disp" "$calib" || exit 1
+
+	#echo cp 3dPoints.xyz "$out"
+	#mv 3dPoints.xyz "$out" || exit 1
+done
+
+cd opencv
+	python reproject_tmi.py || exit 1
+cd ..
+
+echo "done"
