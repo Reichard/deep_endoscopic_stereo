@@ -25,9 +25,14 @@ import glob
 
 import random
 
+import math
+
 DISP_SCALE = 160
 #DISP_SCALE = 1
 DEBUG_SCALE = 1
+
+TRAINING_WIDTH = 960
+TRAINING_HEIGHT = 540
 
 
 train_disps = []
@@ -53,7 +58,14 @@ def build_upconv( input_layer, num_filters, filter_size):
             stride = 2,
             crop = 1)
 
-def build_cnn(input_var=None):
+def freeze(*layers):
+
+    for layer in layers :
+        for param in layer.params :
+            layer.params[param].discard('trainable')
+    return #layer  # optional, if you want to use it in-line
+
+def build_cnn(input_var=None, freeze_inner_layers = False):
     input_layer = lasagne.layers.InputLayer( shape = (None, 6, 384, 768), input_var = input_var )
 
     conv1 = build_conv(input_layer,64,7,2)
@@ -103,9 +115,27 @@ def build_cnn(input_var=None):
     iconv1 = build_conv(merge1,32,3,1)
     pr1 = build_conv(iconv1,1,3,1)
 
+    if freeze_inner_layers :
+        freeze(conv2,conv3a,conv3b,conv4a,conv4b,conv5a,conv5b,conv6a,conv6b,pr6,upconv5,upscale5,merge5,iconv5,pr5
+               ,upconv4,upscale4,merge4,iconv5,pr4,upconv3,upscale3,merge3,iconv3,pr3,upconv2,upscale2,merge2,iconv2,pr2)
+
     return (pr1,pr2,pr3,pr4,pr5,pr6)
 
-def make_batch(left, right, disp=None, disp_factor=1):
+def resize_expand(img, size):
+    result = Image.new(img.mode, size)
+    resized = img.copy()
+
+    ratio = min(size[0]/img.size[0], size[1]/img.size[1])
+    scaled_size = (int(img.size[0]*ratio),int(img.size[1]*ratio))
+
+    #resized.thumbnail(size)
+    resized = resized.resize(scaled_size, resample=Image.BILINEAR) #TODO BICUBIC??
+
+    offset = (math.floor((size[0] - resized.size[0])/2),math.floor((size[1]-resized.size[1])/2))
+    result.paste(resized, offset)
+    return result
+
+def make_batch(left, right, disp=None, disp_masks=None):
         assert(len(left) == len(right))
         assert(disp == None or len(disp) == len(left))
     
@@ -121,26 +151,40 @@ def make_batch(left, right, disp=None, disp_factor=1):
             np.empty([batchsize,1,int(height/16),int(width/16)], dtype=np.float32),
             np.empty([batchsize,1,int(height/32),int(width/32)], dtype=np.float32),
             np.empty([batchsize,1,int(height/64),int(width/63)], dtype=np.float32) ]
+
+        masks = np.empty([batchsize,1,height//2,width//2], dtype=np.float32)
+
+        disp_factors = []
     
         for i in range(0,batchsize):
-            if len(left) <= i: break
-    
-            inputs[i,:3] = np.array(left[i].resize((width,height))).astype(np.float32).transpose(2,0,1)[:3] / 255.0
-            inputs[i,3:] = np.array(right[i].resize((width,height))).astype(np.float32).transpose(2,0,1)[:3] / 255.0
+            disp_factor = TRAINING_HEIGHT / left[i].size[1]
+            disp_factor /= DISP_SCALE
+            disp_factors.append(1.0/disp_factor)
+
+            inputs[i,:3] = np.array(resize_expand(left[i],(width,height))).astype(np.float32).transpose(2,0,1)[:3] / 255.0
+            inputs[i,3:] = np.array(resize_expand(right[i],(width,height))).astype(np.float32).transpose(2,0,1)[:3] / 255.0
     
             if(disp == None): continue
-    
+
             for target_idx in range(0,6):
                 scale = 2**(target_idx+1)
                 w = int(width/scale)
                 h = int(height/scale)
-                targets[target_idx][i] = np.array(disp[i].resize((w,h))).astype(np.float32).reshape(1,h,w) * disp_factor /DISP_SCALE 
+                targets[target_idx][i] = np.array(resize_expand(disp[i],(w,h))).astype(np.float32).reshape(1,h,w) * disp_factor
+
+            if(disp_masks == None):
+                masks[i].fill(1)
+            else:
+                masks[i] = np.array(resize_expand(disp_masks[i],(int(width/2),int(height/2)))).astype(np.float32).reshape(1,int(height/2),int(width/2))
+                masks[i][masks[i] > 0] = 1
     
-        return inputs, targets
+        return inputs, targets, masks, disp_factors
 
 def augment_batch(batch):
     inputs = copy.deepcopy(batch[0])
     outputs = copy.deepcopy(batch[1])
+    masks = copy.deepcopy(batch[2])
+    disp_factors = copy.deepcopy(batch[3])
 
     for inp in inputs:
         r = random.uniform(0.9,1.1)
@@ -160,7 +204,7 @@ def augment_batch(batch):
         inp[4] *= right_g
         inp[5] *= right_b
 
-    return (inputs,outputs)
+    return (inputs,outputs,masks,disp_factors)
 
 
 class Dataset( object ):
@@ -222,20 +266,20 @@ class Dataset( object ):
         return make_batch(left,right,disp)
 
 
-class DispNet( object ):
+class DispNet( object):
 
-    def __init__(self):
-        self.build()
+    def __init__(self, freeze_inner_layers = False ):
+        self.build(freeze_inner_layers)
 
-    def build(self):
+    def build(self, freeze_inner_layers):
         print("Building model and compiling functions...")
 
         self.weight_var = theano.shared(np.array([0,0,0,0,0,1],dtype=np.float32),'weights')
         self.learning_rate_var = theano.shared(np.array(0.001,dtype=np.float32),'learning_rate')
 
         self.input_var = T.tensor4('input')
-    
-        self.prediction_layers = build_cnn(self.input_var)
+        self.pixel_mask = T.tensor4('pixel mask')
+        self.prediction_layers = build_cnn(self.input_var, freeze_inner_layers)
         self.network = self.prediction_layers[0]
     
         self.outputs = lasagne.layers.get_output(self.prediction_layers)
@@ -246,15 +290,23 @@ class DispNet( object ):
         #self.losses = [T.mean(lasagne.objectives.squared_error(pred,var))
         #        for pred,var in zip(self.outputs,self.target_vars)]
 
-        self.losses = [(abs(pred-var)).mean() 
+        self.losses = [abs(pred-var).mean()
                 for pred,var in zip(self.outputs,self.target_vars)]
-
         self.loss = lasagne.objectives.aggregate(T.stack(self.losses), weights = self.weight_var, mode='normalized_sum')
+
+
+        self.outer_loss = (self.pixel_mask * abs(self.outputs[0]-self.target_vars[0])).sum() / self.pixel_mask.sum()
 
         self.params = lasagne.layers.get_all_params(self.network, trainable=True)
 
         self.updates = lasagne.updates.adam(
             self.loss, self.params, 
+            learning_rate=self.learning_rate_var,
+            beta1 = 0.9,
+            beta2 = 0.999 )
+
+        self.outer_updates = lasagne.updates.adam(
+            self.outer_loss, self.params,
             learning_rate=self.learning_rate_var,
             beta1 = 0.9,
             beta2 = 0.999 )
@@ -266,15 +318,28 @@ class DispNet( object ):
                 self.learning_rate_var)
         '''
 
+        self.train_outer_fn = theano.function(
+                name="train_outer",
+                inputs=[self.input_var, self.pixel_mask, self.target_vars[0]],
+                outputs=self.outer_loss,
+                updates=self.outer_updates,
+                #mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
+                )
+
         self.train_fn = theano.function(
                 inputs=[self.input_var] + self.target_vars,
-                outputs=self.loss, 
+                outputs=self.loss,
                 updates=self.updates,
                 #mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
                 )
         self.validate_fn = theano.function(
                 inputs=[self.input_var] + self.target_vars,
                 outputs=self.loss,
+                #mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
+                )
+        self.validate_outer_fn = theano.function(
+                inputs=[self.input_var, self.pixel_mask, self.target_vars[0]],
+                outputs=self.outer_loss,
                 #mode=NanGuardMode(nan_is_error=True, inf_is_error=True, big_is_error=True)
                 )
         self.predict_fn = theano.function([self.input_var], self.prediction,
@@ -292,17 +357,23 @@ class DispNet( object ):
         self.learning_rate_var.set_value(np.array(learning_rate,dtype=np.float32))
     
     def train(self,batch):
-        return self.train_fn(batch[0], *batch[1])
+        return self.train_fn(batch[0], *batch[1] ) * batch[3][0]
+
+    def validate_outer(self,batch):
+        return self.validate_outer_fn(batch[0], batch[2], batch[1][0]) * batch[3][0]
+
+    def train_outer(self,batch):
+        return self.train_outer_fn(batch[0], batch[2], batch[1][0]) * batch[3][0]
 
     def validate(self,batch):
-        return self.validate_fn(batch[0], *batch[1])
+        return self.validate_fn(batch[0], *batch[1]) * batch[3][0]
 
     def predict_data(self,batch_or_left_path,right_path=None):
         batch = batch_or_left_path
         if(right_path != None):
             batch = make_batch([batch_or_left_path], [right_path])
 
-        disp = self.predict_fn(batch[0])[0]*DISP_SCALE
+        disp = self.predict_fn(batch[0])[0]*batch[3][0]
         disp = disp.reshape(disp.shape[1:])
         return disp
 
@@ -313,13 +384,11 @@ class DispNet( object ):
     def debug(self,batch,idx=0):
         if(idx < 0 or idx >= len(batch[0])): return None
 
-
-
         preds = self.debug_fn(batch[0])
 
         grid_image = Image.new('RGB',(384*2,192*7))
 
-        images = [Image.fromarray((np.clip(pred[idx]*DISP_SCALE*DEBUG_SCALE,0,255)).astype(np.uint8).reshape(pred[idx].shape[1:])) for pred in preds]
+        images = [Image.fromarray((np.clip(pred[idx]*batch[3][idx]*DEBUG_SCALE,0,255)).astype(np.uint8).reshape(pred[idx].shape[1:])) for pred in preds]
         images = [image.resize((384,192)) for image in images]
 
         for i in range(0,6):
@@ -333,7 +402,7 @@ class DispNet( object ):
         right = Image.fromarray(right).resize((384,192))
         grid_image.paste(right, (384,0))
 
-        images = [Image.fromarray((np.clip(pred[idx]*DISP_SCALE*DEBUG_SCALE,0,255)).astype(np.uint8).reshape(pred[idx].shape[1:])) for pred in batch[1]]
+        images = [Image.fromarray((np.clip(pred[idx]*batch[3][idx]*DEBUG_SCALE,0,255)).astype(np.uint8).reshape(pred[idx].shape[1:])) for pred in batch[1]]
         images = [image.resize((384,192)) for image in images]
         for i in range(0,6):
             grid_image.paste(images[i], (384,(6-i)*192))
